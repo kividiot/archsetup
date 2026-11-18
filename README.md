@@ -19,7 +19,7 @@ Vanilla Arch on the whole 2 TB NVMe, encrypted with LUKS2, on btrfs with snapper
 | Snapshots | snapper + snap-pac + limine-snapper-sync | A snapshot before and after every pacman transaction, each one bootable |
 | Bootloader | Limine | The only bootloader with maintained snapper boot-entry sync for an unencrypted `/boot` |
 | Kernel | `linux`, with `linux-lts` installed as fallback | Newest amdgpu code for the 9070 XT, plus a second kernel when an update misbehaves |
-| Desktop | Hyprland with the ML4W dotfiles | Same setup and override pattern as the laptop |
+| Desktop | Hyprland with a stock install of the ML4W dotfiles | A complete, maintained rice with its own installer and updater |
 | Updates | paru for repos and AUR, arch-update for the tray notifier | One command, news shown before upgrading |
 
 The base install is pasted from this runbook, block by block. Everything after first boot is in [`post-install.sh`](post-install.sh), which is safe to run again.
@@ -192,7 +192,7 @@ echo 'KEYMAP=sv-latin1' > /etc/vconsole.conf
 echo "$NEW_HOST" > /etc/hostname
 ```
 
-Timezone, locale and keymap match the laptop's current settings.
+Timezone, locale and keymap are Swedish defaults. Change them here, and the `loadkeys` line earlier, if the desktop should differ.
 
 **Users and sudo**
 
@@ -377,7 +377,7 @@ Unlock and mount the top-level subvolume, move `@` aside, and snapshot the wante
 
 ## Phase 5: Desktop and rice
 
-The rice is the ML4W dotfiles, the same profile the laptop runs. Arch ships Hyprland 0.57.2, the version the laptop is on, so the Lua config and existing overrides carry over unchanged.
+The rice is a stock install of the ML4W dotfiles. Nothing is copied from another machine. The only addition is the display and gaming snippet that the post-install script wrote.
 
 **Install the dotfiles**
 
@@ -398,10 +398,6 @@ echo 'dofile(os.getenv("HOME") .. "/.config/gaming/hyprland.lua")' >> ~/.config/
 mkdir -p ~/.config/ml4w-dotfiles-installer/com.ml4w.dotfiles.stable
 echo '.config/hypr/custom.lua' >> ~/.config/ml4w-dotfiles-installer/com.ml4w.dotfiles.stable/blacklist
 ```
-
-**Bring over the laptop overrides**
-
-Copy the override files and the installer blacklist maintained for the laptop. Leave out `monitors.lua` and anything tied to the laptop panel, touchpad or battery. In the zsh plugin override, swap the `dnf` plugin for `archlinux`.
 
 **Start the desktop**
 
@@ -534,8 +530,6 @@ Every app on the list has a package, and the post-install script installs all of
 | Wine | `wine-staging` | extra | 11.22 | |
 
 The two slicers are separate packages from different upstreams and should install side by side. If pacman reports a file conflict between them, keep Snapmaker Orca from the AUR and take OrcaSlicer from Flathub instead.
-
-Copy `~/.config/nvim` from the laptop to get the Neovim setup back.
 
 ## Audio: Audeze Maxwell
 
