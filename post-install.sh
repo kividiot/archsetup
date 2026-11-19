@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-STAGES=(system snapper paru limine graphics desktop audio gaming apps maintenance userconfig summary)
+STAGES=(system snapper paru limine graphics desktop audio gaming apps maintenance userconfig shell summary)
 
 MIRROR_COUNTRIES="Sweden,Germany"
 FAILED=()
@@ -56,6 +56,16 @@ aur_required() {
         aur "$pkg"
         pacman -Qq "$pkg" &>/dev/null || die "Required AUR package $pkg did not install."
     done
+}
+
+# Shallow git clone, skipped when the destination already exists.
+clone() {
+    local url=$1 dest=$2
+    if [[ -d $dest ]]; then
+        return 0
+    fi
+    git clone --quiet --depth=1 "$url" "$dest"
+    info "cloned $dest"
 }
 
 # Create a btrfs subvolume at a path in $HOME so that home snapshots skip it.
@@ -369,6 +379,72 @@ EOF
     fi
 }
 
+stage_shell() {
+    # zsh, oh-my-zsh and powerlevel10k, laid out the way the ML4W zsh config
+    # expects: oh-my-zsh in ~/.oh-my-zsh with the three plugins ML4W loads
+    # cloned into its custom folder. fzf is sourced by that config as well.
+    pac zsh fzf
+
+    local omz=$HOME/.oh-my-zsh
+    clone https://github.com/ohmyzsh/ohmyzsh.git "$omz"
+    clone https://github.com/zsh-users/zsh-autosuggestions.git "$omz/custom/plugins/zsh-autosuggestions"
+    clone https://github.com/zsh-users/zsh-syntax-highlighting.git "$omz/custom/plugins/zsh-syntax-highlighting"
+    clone https://github.com/zdharma-continuum/fast-syntax-highlighting.git "$omz/custom/plugins/fast-syntax-highlighting"
+    clone https://github.com/romkatv/powerlevel10k.git "$omz/custom/themes/powerlevel10k"
+
+    # The prompt override and the login shell need ML4W's zsh config, which
+    # only exists after the ML4W install (runbook Phase 5).
+    local stock=$HOME/.config/zshrc/20-customization
+    if [[ ! -f $stock ]]; then
+        info "ML4W dotfiles are not installed yet: the login shell stays as it is."
+        info "Run 'bash post-install.sh shell' again after the ML4W install."
+        return 0
+    fi
+
+    # ML4W loads ~/.config/zshrc/custom/<name> in place of its own file of the
+    # same name. The override is the stock file with the oh-my-posh prompt
+    # taken out and powerlevel10k put in.
+    local override=$HOME/.config/zshrc/custom/20-customization
+    if [[ ! -f $override ]]; then
+        mkdir -p "$(dirname "$override")"
+        {
+            cat <<'EOF'
+# Written by post-install.sh (stage "shell") from ML4W's stock
+# ~/.config/zshrc/20-customization, with oh-my-posh replaced by powerlevel10k.
+# To rebuild it after an ML4W update, delete this file and run the stage again.
+
+ZSH_THEME="powerlevel10k/powerlevel10k"
+# The wizard does not start by itself; run `p10k configure` when you want it.
+typeset -g POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD=true
+
+EOF
+            grep -v -e 'oh-my-posh init' -e '^# Shipped Theme' -e '^[[:space:]]*ZSH_THEME=' "$stock" || true
+            cat <<'EOF'
+
+# Prompt settings written by `p10k configure`.
+[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
+EOF
+        } >"$override"
+        zsh -n "$override" || warn "$override does not parse; check it before opening a new terminal."
+        info "wrote $override"
+    fi
+
+    # ML4W does not ship this path today, so its updates leave it alone. The
+    # blacklist entry keeps it that way if that ever changes.
+    local blacklist=$HOME/.config/ml4w-dotfiles-installer/com.ml4w.dotfiles.stable/blacklist
+    local entry=.config/zshrc/custom/20-customization
+    mkdir -p "$(dirname "$blacklist")"
+    if ! grep -qxF "$entry" "$blacklist" 2>/dev/null; then
+        echo "$entry" >>"$blacklist"
+    fi
+
+    local zsh_path=/usr/bin/zsh
+    if [[ $(getent passwd "$USER" | cut -d: -f7) != "$zsh_path" ]]; then
+        sudo chsh -s "$zsh_path" "$USER" >/dev/null
+        info "login shell is now zsh, from the next login"
+    fi
+}
+
 stage_summary() {
     log "Checks"
     info "kernel:      $(uname -r)"
@@ -377,6 +453,7 @@ stage_summary() {
     info "snapper:     $(sudo snapper list-configs --columns config 2>/dev/null | tail -n +3 | tr '\n' ' ')"
     info "lactd:       $(systemctl is-active lactd.service 2>/dev/null || true)"
     info "sddm:        $(systemctl is-enabled sddm.service 2>/dev/null || true)"
+    info "login shell: $(getent passwd "$USER" | cut -d: -f7)"
     if command -v limine-snapper-info >/dev/null; then
         sudo limine-snapper-info || true
     fi
@@ -389,6 +466,9 @@ stage_summary() {
     log "Next"
     info "1. Reboot and pick the new \"Arch Linux\" entry in the Limine menu."
     info "2. Continue with the runbook: remove the bootstrap entries, then install the ML4W dotfiles."
+    if [[ $(getent passwd "$USER" | cut -d: -f7) != /usr/bin/zsh ]]; then
+        info "3. After the ML4W install, run 'bash post-install.sh shell' once more to switch to zsh."
+    fi
 }
 
 # -------------------------------------------------------------------- main ---

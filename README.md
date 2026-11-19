@@ -20,6 +20,7 @@ Vanilla Arch on the whole 2 TB NVMe, encrypted with LUKS2, on btrfs with snapper
 | Bootloader | Limine | The only bootloader with maintained snapper boot-entry sync for an unencrypted `/boot` |
 | Kernel | `linux`, with `linux-lts` installed as fallback | Newest amdgpu code for the 9070 XT, plus a second kernel when an update misbehaves |
 | Desktop | Hyprland with a stock install of the ML4W dotfiles | A complete, maintained rice with its own installer and updater |
+| Shell | zsh with oh-my-zsh and the powerlevel10k prompt | ML4W's own zsh config, with its oh-my-posh prompt swapped for powerlevel10k |
 | Updates | paru for repos and AUR, arch-update for the tray notifier | One command, news shown before upgrading |
 
 The base install is pasted from this runbook, block by block. Everything after first boot is in [`post-install.sh`](post-install.sh), which is safe to run again.
@@ -306,6 +307,7 @@ It asks for your sudo password once. Every stage can be run again, and single st
 | `apps` | Discord, Neovim and its helpers, Helium, Snapmaker Orca, OrcaSlicer |
 | `maintenance` | Mirror refresh, package cache cleanup, monthly btrfs scrub, fwupd, arch-update |
 | `userconfig` | Hyprland display and gaming snippet, MangoHud config |
+| `shell` | zsh, oh-my-zsh with the plugins ML4W loads, powerlevel10k. The prompt and the login shell follow when it runs again in Phase 5 |
 | `summary` | Health checks and a list of any AUR package that failed |
 
 **What to expect while it runs**
@@ -377,7 +379,7 @@ Unlock and mount the top-level subvolume, move `@` aside, and snapshot the wante
 
 ## Phase 5: Desktop and rice
 
-The rice is a stock install of the ML4W dotfiles. Nothing is copied from another machine. The only addition is the display and gaming snippet that the post-install script wrote.
+The rice is a stock install of the ML4W dotfiles. Nothing is copied from another machine. The post-install script adds two things on top: the display and gaming snippet, and powerlevel10k as the zsh prompt.
 
 **Install the dotfiles**
 
@@ -399,6 +401,24 @@ mkdir -p ~/.config/ml4w-dotfiles-installer/com.ml4w.dotfiles.stable
 echo '.config/hypr/custom.lua' >> ~/.config/ml4w-dotfiles-installer/com.ml4w.dotfiles.stable/blacklist
 ```
 
+**Switch to zsh with powerlevel10k**
+
+ML4W installs zsh and ships a zsh config built on oh-my-zsh, with oh-my-posh as the prompt. It leaves the login shell alone until you choose "Change Shell" in its Welcome app. Skip that entry and run the `shell` stage again instead, now that the ML4W files exist:
+
+```bash
+bash ~/archsetup/post-install.sh shell
+```
+
+The stage does three things:
+
+- It writes `~/.config/zshrc/custom/20-customization`, a copy of ML4W's file of the same name with the oh-my-posh lines removed and powerlevel10k set as the oh-my-zsh theme. ML4W loads a file in `custom/` in place of its own.
+- It adds that path to the installer blacklist.
+- It makes zsh your login shell, from the next login.
+
+oh-my-zsh, the three plugins ML4W's config loads and powerlevel10k were already cloned into `~/.oh-my-zsh` when the script first ran.
+
+The override is a copy, so later changes ML4W makes to its own `20-customization` do not reach it. To pick them up, delete the override and run the stage again.
+
 **Start the desktop**
 
 ```bash
@@ -406,6 +426,19 @@ sudo reboot
 ```
 
 SDDM comes up after the passphrase prompt. Set the keyboard layout to `se` in the ML4W settings app if the installer did not ask.
+
+**Set up the prompt**
+
+powerlevel10k starts with its default look. Its wizard is switched off from starting by itself, so that it runs in kitty with the desktop's fonts and not in an SSH session. Open kitty and run it once:
+
+```bash
+p10k configure
+```
+
+- Instant prompt: choose `Off`. ML4W prints fastfetch when a terminal opens, and instant prompt warns about output during startup.
+- "Apply changes to ~/.zshrc?": answer `n`. That file is ML4W's loader, and the override already reads `~/.p10k.zsh`.
+
+The wizard saves your choices in `~/.p10k.zsh`. Run it again whenever you want a different look.
 
 **OLED care**
 
@@ -583,6 +616,12 @@ fwupdmgr refresh && fwupdmgr update     # device firmware
 
 GE-Proton updates through ProtonPlus. The ML4W dotfiles update through their own installer, which respects the blacklist file.
 
+oh-my-zsh offers to update itself in the terminal every two weeks, and `omz update` does it on demand. Its three plugins and powerlevel10k are plain git clones that nothing else updates:
+
+```bash
+for repo in ~/.oh-my-zsh/custom/{plugins,themes}/*/.git; do git -C "${repo%/.git}" pull --ff-only; done
+```
+
 **What runs by itself**
 
 | Timer | Interval | Job |
@@ -618,6 +657,7 @@ Nothing in this runbook has run on the hardware yet. These are the points to con
 - [ ] A snapshot entry boots. Try one before you need one.
 - [ ] The output name and scale in `~/.config/gaming/hyprland.lua` match the monitor.
 - [ ] `headsetcontrol -b` answers without sudo.
+- [ ] A new kitty window opens zsh with the powerlevel10k prompt and no error lines above it.
 - [ ] Both slicers start.
 
 If the snapshot paths are detected wrongly, set `ROOT_SUBVOLUME_PATH` and `ROOT_SNAPSHOTS_PATH` in `/etc/default/limine` and run `sudo limine-update`.
@@ -648,6 +688,7 @@ sshd stays enabled from the install. Run `sudo systemctl disable --now sshd` if 
 - Hyprland 0.57 wiki: [monitor colors and HDR](https://wiki.hypr.land/0.57.0/configuring/core/monitors/colors/), [tearing](https://wiki.hypr.land/0.57.0/configuring/extra/tearing/), [config options](https://wiki.hypr.land/0.57.0/configuring/core/config-options/)
 - [GE-Proton README](https://github.com/GloriousEggroll/proton-ge-custom): HDR, NTSync and FSR 4 options
 - [ML4W dotfiles README](https://github.com/mylinuxforwork/dotfiles)
+- [powerlevel10k README](https://github.com/romkatv/powerlevel10k) and [oh-my-zsh README](https://github.com/ohmyzsh/ohmyzsh)
 - [HeadsetControl README](https://github.com/Sapd/HeadsetControl)
 - [arch-update README](https://github.com/Antiz96/arch-update)
 - [GamingOnLinux on AMD HDMI 2.1](https://www.gamingonlinux.com/2026/05/further-expanded-amd-hdmi-2-1-support-is-coming-to-linux-now-with-frl-and-dsc/)
