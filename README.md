@@ -754,7 +754,7 @@ Nothing in this runbook has run on the hardware yet. These are the points to con
 - [ ] The size check in Phase 1 printed `OK`: `OS_DISK` is the 250 GB drive and `DATA_DISK` the 2 TB drive.
 - [ ] The passphrase works at the boot prompt, typed on the desktop keyboard.
 - [ ] There is one passphrase prompt at boot, and `findmnt /home` shows `/dev/mapper/cryptdata`.
-- [ ] `sudo limine-snapper-info` shows `/@` as the root subvolume and `/@snapshots` as the snapshot path.
+- [ ] `sudo limine-snapper-info` lists snapshot entries and reports 0 missing and 0 corrupted files.
 - [ ] A snapshot entry boots. Try one before you need one.
 - [ ] The output name and scale in `~/.config/gaming/hyprland.lua` match the monitor.
 - [ ] `headsetcontrol -b` answers without sudo.
