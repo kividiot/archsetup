@@ -4,7 +4,7 @@ Runbook and post-install script for a gaming desktop on vanilla Arch Linux.
 
 - **Hardware:** Ryzen 7 5700X3D, 32 GB DDR4 3200 CL14, Radeon RX 9070 XT, 250 GB and 2 TB NVMe, 4K 165 Hz OLED
 - **Checked against the Arch repositories and the AUR on:** 2026-11-19
-- **Status:** written from documentation, not yet run on the hardware. See [Checks and known gotchas](#checks-and-known-gotchas).
+- **Status:** installed on this hardware on 2026-11-19; the post-install script ran to the end unchanged. See [Checks and known gotchas](#checks-and-known-gotchas).
 
 ## What you are building
 
@@ -747,7 +747,7 @@ Boot the pre-update snapshot from the Limine menu and follow "Roll back a bad up
 
 ## Checks and known gotchas
 
-Nothing in this runbook has run on the hardware yet. These are the points to confirm along the way, followed by the issues that could come up.
+The install ran on the hardware on 2026-11-19. These are the points to confirm along the way, followed by the issues that could come up.
 
 **Confirm on the day**
 
