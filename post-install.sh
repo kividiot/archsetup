@@ -289,16 +289,17 @@ stage_apps() {
 
 stage_ollama() {
     # Models run to tens of GB. They belong in a top-level subvolume of their
-    # own, so root snapshots do not pin them and a rollback of @ leaves them
-    # in place. The runbook creates @ollama in Phase 1; this part covers an
-    # install that was partitioned before that step existed.
+    # own next to @home on the data drive, so root snapshots do not pin them
+    # and a rollback of @ leaves them in place. The runbook creates @ollama in
+    # Phase 1; this part covers an install that was partitioned without it.
     local models=/var/lib/ollama
     if ! findmnt -n "$models" >/dev/null; then
         if [[ -d $models && -n $(ls -A "$models" 2>/dev/null) ]]; then
             warn "$models already has content and is not its own subvolume: the models stay in the root snapshots."
         else
             local dev top line
-            dev=$(findmnt -no SOURCE / | sed 's/\[.*//')
+            dev=$(findmnt -no SOURCE /home | sed 's/\[.*//')
+            [[ -n $dev ]] || die "/home is not a separate mount; cannot place @ollama next to @home."
             top=$(mktemp -d)
             sudo mount -o subvolid=5 "$dev" "$top"
             if [[ ! -d $top/@ollama ]]; then
@@ -307,11 +308,10 @@ stage_ollama() {
             sudo umount "$top"
             rmdir "$top"
 
-            # Same device and mount options as the package cache, other subvolume.
+            # Same device and mount options as /home, other subvolume.
             if ! awk -v m="$models" '$2 == m { found = 1 } END { exit !found }' /etc/fstab; then
-                line=$(awk '$2 == "/var/cache/pacman/pkg"' /etc/fstab \
-                    | sed -E -e "s|/var/cache/pacman/pkg|$models|" -e 's|subvol=/?@pkg|subvol=/@ollama|')
-                [[ $line == *"subvol=/@ollama"* ]] || die "Could not derive an fstab line for $models from the @pkg line."
+                line=$(awk -v m="$models" '$2 == "/home" { sub(/subvol=\/?@home/, "subvol=/@ollama", $4); $2 = m; print }' /etc/fstab)
+                [[ $line == *"subvol=/@ollama"* ]] || die "Could not derive an fstab line for $models from the /home line."
                 echo "$line" | sudo tee -a /etc/fstab >/dev/null
             fi
             sudo mkdir -p "$models"
@@ -397,6 +397,10 @@ EOF
     sudo systemctl enable --now reflector.timer      # fresh mirror list weekly
     sudo systemctl enable --now paccache.timer       # keep the 3 newest versions of each cached package
     sudo systemctl enable --now btrfs-scrub@-.timer  # monthly checksum scrub of the root filesystem
+    # /home is a second filesystem when it lives on its own drive.
+    if [[ $(findmnt -no UUID /home) != "$(findmnt -no UUID /)" ]]; then
+        sudo systemctl enable --now btrfs-scrub@home.timer
+    fi
 
     if pacman -Qq arch-update &>/dev/null; then
         systemctl --user enable --now arch-update.timer || warn "Could not enable arch-update.timer; run 'systemctl --user enable --now arch-update.timer' after logging in."
@@ -546,6 +550,7 @@ EOF
 stage_summary() {
     log "Checks"
     info "kernel:      $(uname -r)"
+    info "drives:      / on $(findmnt -no SOURCE / | sed 's/\[.*//'), /home on $(findmnt -no SOURCE /home | sed 's/\[.*//')"
     info "zram:        $(swapon --noheadings --show=NAME,SIZE 2>/dev/null | tr -s ' ' | tr '\n' ' ')"
     info "ntsync:      $([[ -e /dev/ntsync ]] && echo present || echo 'missing (reboot first)')"
     info "snapper:     $(sudo snapper list-configs --columns config 2>/dev/null | tail -n +3 | tr '\n' ' ')"

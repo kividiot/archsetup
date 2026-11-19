@@ -2,20 +2,21 @@
 
 Runbook and post-install script for a gaming desktop on vanilla Arch Linux.
 
-- **Hardware:** Ryzen 7 5700X3D, 32 GB DDR4 3200 CL14, Radeon RX 9070 XT, 2 TB NVMe, 4K 165 Hz OLED
+- **Hardware:** Ryzen 7 5700X3D, 32 GB DDR4 3200 CL14, Radeon RX 9070 XT, 250 GB and 2 TB NVMe, 4K 165 Hz OLED
 - **Checked against the Arch repositories and the AUR on:** 2026-11-19
 - **Status:** written from documentation, not yet run on the hardware. See [Checks and known gotchas](#checks-and-known-gotchas).
 
 ## What you are building
 
-Vanilla Arch on the whole 2 TB NVMe, encrypted with LUKS2, on btrfs with snapper snapshots that are bootable from the boot menu. Hyprland is the only desktop session, and gamescope wraps the games that need it.
+Vanilla Arch with the system on the 250 GB NVMe and home, games and Ollama models on the 2 TB NVMe. Both drives are encrypted with LUKS2 and run btrfs, and snapper snapshots of the system are bootable from the boot menu. Hyprland is the only desktop session, and gamescope wraps the games that need it.
 
 | Area | Choice | Reason |
 | --- | --- | --- |
 | Install method | Manual commands, pasted over SSH into the live ISO | Every step is visible and repeatable |
-| Partitions | 4 GiB EFI partition at `/boot`, rest is one LUKS2 container | Kernels sit on the EFI partition, so each snapshot keeps its own bootable kernel copy |
-| Unlock | Passphrase at boot | Nothing depends on TPM or Secure Boot state |
-| Filesystem | btrfs with zstd compression and separate subvolumes for root, home, snapshots, logs, package cache and Ollama models | Root snapshots stay small and never roll back your home or game libraries |
+| Drives | System on the 250 GB NVMe, home, games and Ollama models on the 2 TB NVMe | A reinstall of the system never touches the data drive, and all of the 2 TB goes to home and games |
+| Partitions | 250 GB: 4 GiB EFI partition at `/boot`, rest is one LUKS2 container. 2 TB: one LUKS2 container | Kernels sit on the EFI partition, so each snapshot keeps its own bootable kernel copy |
+| Unlock | One passphrase at boot. It opens the system drive, and a key file stored there opens the data drive | Nothing depends on TPM or Secure Boot state |
+| Filesystem | btrfs with zstd compression on both drives. Subvolumes for root, snapshots, logs and package cache on the system drive, for home and Ollama models on the data drive | Root snapshots stay small and never roll back your home or game libraries |
 | Snapshots | snapper + snap-pac + limine-snapper-sync | A snapshot before and after every pacman transaction, each one bootable |
 | Bootloader | Limine | The only bootloader with maintained snapper boot-entry sync for an unencrypted `/boot` |
 | Kernel | `linux`, with `linux-lts` installed as fallback | Newest amdgpu code for the 9070 XT, plus a second kernel when an update misbehaves |
@@ -78,26 +79,44 @@ Start `bash` first. The ISO's default shell is zsh, which can choke on pasted `#
 bash
 cat /sys/firmware/efi/fw_platform_size    # must print 64
 timedatectl | grep synchronized           # must say yes
-lsblk -d -o NAME,SIZE,MODEL               # the 2 TB NVMe, normally nvme0n1
+lsblk -d -o NAME,SIZE,MODEL               # both NVMe drives must show up
 ```
 
-## Phase 1: Disk
+## Phase 1: Disks
 
-This phase wipes the NVMe and leaves an encrypted btrfs mounted at `/mnt`. Check `DISK` twice, because the second command is not reversible.
+This phase wipes both NVMe drives. The 250 GB drive gets the EFI partition and the encrypted system, the 2 TB drive gets an encrypted btrfs for home, games and Ollama models. Everything ends up mounted under `/mnt`. Check the two disk variables twice, because the wipe is not reversible.
+
+**Pick the drives**
+
+```bash
+lsblk -d -o NAME,SIZE,MODEL,SERIAL
+OS_DISK=/dev/nvme0n1       # the 250 GB drive
+DATA_DISK=/dev/nvme1n1     # the 2 TB drive
+
+# Must print OK.
+[ "$(lsblk -dnbo SIZE "$OS_DISK")" -lt "$(lsblk -dnbo SIZE "$DATA_DISK")" ] && echo OK || echo "STOP: swap the two variables"
+
+ESP=${OS_DISK}p1
+ROOT=${OS_DISK}p2
+DATA=${DATA_DISK}p1
+```
+
+The kernel can number the two drives the other way round on another boot, so set the variables from what `lsblk` shows now and do not continue unless the check prints `OK`. The installed system refers to both drives by UUID and does not depend on the numbering.
 
 **Partition**
 
 ```bash
-DISK=/dev/nvme0n1
-ESP=${DISK}p1
-ROOT=${DISK}p2
+blkdiscard -f "$OS_DISK"
+sgdisk --zap-all "$OS_DISK"
+sgdisk -n1:0:+4G -t1:ef00 -c1:EFI       "$OS_DISK"
+sgdisk -n2:0:0   -t2:8309 -c2:cryptroot "$OS_DISK"
 
-blkdiscard -f "$DISK"
-sgdisk --zap-all "$DISK"
-sgdisk -n1:0:+4G -t1:ef00 -c1:EFI       "$DISK"
-sgdisk -n2:0:0   -t2:8309 -c2:cryptroot "$DISK"
-partprobe "$DISK"
-lsblk "$DISK"
+blkdiscard -f "$DATA_DISK"
+sgdisk --zap-all "$DATA_DISK"
+sgdisk -n1:0:0   -t1:8309 -c1:cryptdata "$DATA_DISK"
+
+partprobe "$OS_DISK" "$DATA_DISK"
+lsblk "$OS_DISK" "$DATA_DISK"
 ```
 
 The EFI partition is 4 GiB on purpose. limine-snapper-sync stores a kernel and initramfs copy per bootable snapshot there, and its documentation recommends at least that size.
@@ -106,8 +125,12 @@ The EFI partition is 4 GiB on purpose. limine-snapper-sync stores a kernel and i
 
 ```bash
 cryptsetup luksFormat --type luks2 --label cryptroot "$ROOT"
+cryptsetup luksFormat --type luks2 --label cryptdata "$DATA"
 cryptsetup open --allow-discards --perf-no_read_workqueue --perf-no_write_workqueue --persistent "$ROOT" cryptroot
+cryptsetup open --allow-discards --perf-no_read_workqueue --perf-no_write_workqueue --persistent "$DATA" cryptdata
 ```
+
+Give both drives the same passphrase. At boot you type it once, for the system drive, and the data drive opens with a key file that Phase 2 creates. The passphrase on the data drive is there for opening it from a rescue system.
 
 The `--persistent` flags are stored in the LUKS2 header. They enable TRIM through the encryption layer and skip the dm-crypt work queues, which is faster on NVMe. You type the passphrase over SSH here and on the desktop keyboard at boot. Both produce the same characters as long as the console keymap is set in Phase 2.
 
@@ -116,36 +139,43 @@ The `--persistent` flags are stored in the LUKS2 header. They enable TRIM throug
 ```bash
 mkfs.fat -F32 -n EFI "$ESP"
 mkfs.btrfs -L arch /dev/mapper/cryptroot
+mkfs.btrfs -L data /dev/mapper/cryptdata
 
 mount /dev/mapper/cryptroot /mnt
-for sv in @ @home @snapshots @log @pkg @ollama; do btrfs subvolume create /mnt/$sv; done
+for sv in @ @snapshots @log @pkg; do btrfs subvolume create /mnt/$sv; done
+umount /mnt
+
+mount /dev/mapper/cryptdata /mnt
+for sv in @home @ollama; do btrfs subvolume create /mnt/$sv; done
 umount /mnt
 ```
 
-| Subvolume | Mounted at | Rolled back with root |
-| --- | --- | --- |
-| `@` | `/` | Yes |
-| `@home` | `/home` | No, it gets its own snapshot timeline |
-| `@snapshots` | `/.snapshots` | No, it holds the root snapshots |
-| `@log` | `/var/log` | No, so logs from a broken boot survive the rollback |
-| `@pkg` | `/var/cache/pacman/pkg` | No, the package cache is disposable |
-| `@ollama` | `/var/lib/ollama` | No, downloaded models are large and can be pulled again |
+| Subvolume | Drive | Mounted at | Rolled back with root |
+| --- | --- | --- | --- |
+| `@` | 250 GB | `/` | Yes |
+| `@snapshots` | 250 GB | `/.snapshots` | No, it holds the root snapshots |
+| `@log` | 250 GB | `/var/log` | No, so logs from a broken boot survive the rollback |
+| `@pkg` | 250 GB | `/var/cache/pacman/pkg` | No, the package cache is disposable |
+| `@home` | 2 TB | `/home` | No, it gets its own snapshot timeline |
+| `@ollama` | 2 TB | `/var/lib/ollama` | No, downloaded models are large and can be pulled again |
+
+The Steam library, `~/Games` and the XIVLauncher data become subvolumes inside `@home` in Phase 3, so the games sit on the 2 TB drive as well.
 
 **Mount**
 
 ```bash
 OPTS=noatime,compress=zstd:1
 mount -o $OPTS,subvol=@ /dev/mapper/cryptroot /mnt
-mount --mkdir -o $OPTS,subvol=@home      /dev/mapper/cryptroot /mnt/home
 mount --mkdir -o $OPTS,subvol=@snapshots /dev/mapper/cryptroot /mnt/.snapshots
 mount --mkdir -o $OPTS,subvol=@log       /dev/mapper/cryptroot /mnt/var/log
 mount --mkdir -o $OPTS,subvol=@pkg       /dev/mapper/cryptroot /mnt/var/cache/pacman/pkg
-mount --mkdir -o $OPTS,subvol=@ollama    /dev/mapper/cryptroot /mnt/var/lib/ollama
+mount --mkdir -o $OPTS,subvol=@home      /dev/mapper/cryptdata /mnt/home
+mount --mkdir -o $OPTS,subvol=@ollama    /dev/mapper/cryptdata /mnt/var/lib/ollama
 mount --mkdir -o umask=0077 "$ESP" /mnt/boot
 findmnt -R /mnt
 ```
 
-`findmnt` must list seven mounts: root, home, snapshots, log, pkg, ollama and boot.
+`findmnt` must list seven mounts: root, snapshots, log and pkg from `cryptroot`, home and ollama from `cryptdata`, and boot.
 
 ## Phase 2: Base system
 
@@ -169,6 +199,19 @@ grep -c subvolid /mnt/etc/fstab     # must print 0
 ```
 
 The `subvolid` options have to go. A rollback replaces `@` with a new subvolume that has a new ID but the same path, and mounting by ID would then fail.
+
+**Key file for the data drive**
+
+```bash
+install -d -m 700 /mnt/etc/cryptsetup-keys.d
+dd if=/dev/urandom of=/mnt/etc/cryptsetup-keys.d/cryptdata.key bs=4096 count=1 iflag=fullblock
+chmod 400 /mnt/etc/cryptsetup-keys.d/cryptdata.key
+cryptsetup luksAddKey "$DATA" /mnt/etc/cryptsetup-keys.d/cryptdata.key     # asks for the passphrase
+echo "cryptdata  UUID=$(cryptsetup luksUUID "$DATA")  /etc/cryptsetup-keys.d/cryptdata.key  luks" >> /mnt/etc/crypttab
+tail -n 1 /mnt/etc/crypttab
+```
+
+The key file lives on the encrypted system drive, so it can only be read once your passphrase has opened that drive. systemd then opens the data drive from `/etc/crypttab` before it mounts `/home`. The key file is not copied into the initramfs, which sits on the unencrypted EFI partition.
 
 **Enter the new system**
 
@@ -267,25 +310,27 @@ systemctl enable NetworkManager sshd systemd-timesyncd fstrim.timer
 exit
 ```
 
-**Back up the LUKS header and reboot**
+**Back up the LUKS headers and reboot**
 
 ```bash
-cryptsetup luksHeaderBackup "$ROOT" --header-backup-file /root/luks-header-backup.img
+cryptsetup luksHeaderBackup "$ROOT" --header-backup-file /root/luks-header-root.img
+cryptsetup luksHeaderBackup "$DATA" --header-backup-file /root/luks-header-data.img
 ```
 
-Copy it off from the laptop before rebooting, and keep it somewhere that is not the desktop. A damaged header without a backup means the data is gone, passphrase or not.
+Copy both off from the laptop before rebooting, and keep them somewhere that is not the desktop. A damaged header without a backup means the data on that drive is gone, passphrase or not.
 
 ```bash
-scp -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no root@<desktop-ip>:/root/luks-header-backup.img ~/
+scp -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no 'root@<desktop-ip>:/root/luks-header-*.img' ~/
 ```
 
 ```bash
 umount -R /mnt
+cryptsetup close cryptdata
 cryptsetup close cryptroot
 reboot
 ```
 
-Pull the USB stick. You should get the Limine menu, then the passphrase prompt, then a console login. If the firmware does not find the disk, pick the NVMe from the firmware boot menu once.
+Pull the USB stick. You should get the Limine menu, then one passphrase prompt, then a console login. If the firmware does not find the system, pick the 250 GB NVMe from the firmware boot menu once.
 
 ## Phase 3: Post-install script
 
@@ -361,7 +406,7 @@ Snapshots taken before the Limine tooling was installed never become boot entrie
 | `root` | `/` without home, logs, package cache and Ollama models | Before and after every pacman or paru transaction | 20, plus up to 6 marked important |
 | `home` | `/home` without `~/.cache`, Steam, `~/.local/share/dev.goats.xivlauncher`, `~/Games` | Hourly | 6 hourly, 7 daily, 2 weekly |
 
-The newest 12 root snapshots are bootable from the Limine menu. Snapshots sit on the same SSD as the data. They undo bad updates and deleted files, and they do not survive a dead drive, so anything irreplaceable still needs a copy elsewhere.
+The newest 12 root snapshots are bootable from the Limine menu. Every snapshot sits on the same drive as the data it covers: root snapshots on the 250 GB drive, home snapshots on the 2 TB drive. They undo bad updates and deleted files, and they do not survive a dead drive, so anything irreplaceable still needs a copy elsewhere.
 
 **Roll back a bad update**
 
@@ -689,7 +734,7 @@ for repo in ~/.oh-my-zsh/custom/{plugins,themes}/*/.git; do git -C "${repo%/.git
 | `reflector.timer` | Weekly | Refreshes the mirror list |
 | `paccache.timer` | Weekly | Trims the package cache to three versions |
 | `fstrim.timer` | Weekly | TRIM through the encryption layer |
-| `btrfs-scrub@-.timer` | Monthly | Verifies checksums on the whole filesystem |
+| `btrfs-scrub@-.timer`, `btrfs-scrub@home.timer` | Monthly | Verify checksums on the system drive and on the data drive |
 
 **Two rules for this boot setup**
 
@@ -706,8 +751,9 @@ Nothing in this runbook has run on the hardware yet. These are the points to con
 
 **Confirm on the day**
 
-- [ ] `DISK` in Phase 1 is the 2 TB NVMe and nothing else.
+- [ ] The size check in Phase 1 printed `OK`: `OS_DISK` is the 250 GB drive and `DATA_DISK` the 2 TB drive.
 - [ ] The passphrase works at the boot prompt, typed on the desktop keyboard.
+- [ ] There is one passphrase prompt at boot, and `findmnt /home` shows `/dev/mapper/cryptdata`.
 - [ ] `sudo limine-snapper-info` shows `/@` as the root subvolume and `/@snapshots` as the snapshot path.
 - [ ] A snapshot entry boots. Try one before you need one.
 - [ ] The output name and scale in `~/.config/gaming/hyprland.lua` match the monitor.
@@ -728,13 +774,14 @@ If the snapshot paths are detected wrongly, set `ROOT_SUBVOLUME_PATH` and `ROOT_
 | Clicking links in kitty does nothing | kitty 0.50.0, the version Arch ships | Add an `open-actions.conf` that hands links to `xdg-open` |
 | The Limine menu is gone after a firmware update | The firmware dropped its boot entry | Nothing. The fallback loader boots, and `sudo limine-install` re-registers the entry |
 | `mkinitcpio -P` asks about Limine | The Limine tooling wraps it | Answer yes, or use `sudo limine-update` |
+| Boot stops in emergency mode after the passphrase | The data drive did not open or mount | Log in as root and read `systemctl status systemd-cryptsetup@cryptdata.service`. `cryptsetup open /dev/disk/by-partlabel/cryptdata cryptdata` opens it with the passphrase, then `mount -a` and `systemctl default` continue the boot |
 | `ryzen-undervolt.service` fails after a kernel update | DKMS could not build ryzen_smu for the new kernel | Check `dkms status`. The system runs at stock voltage until the module builds again, so boot `linux-lts` or wait for the AUR package to catch up |
 | `ollama ps` says CPU and answers are slow | ROCm did not accept the GPU | Follow "ROCm is not utilizing my AMD GPU" on the [Arch wiki](https://wiki.archlinux.org/title/Ollama#ROCm_is_not_utilizing_my_AMD_GPU), or switch to `ollama-vulkan` |
 
 **Deliberately left out**
 
 - Secure Boot. The EFI partition is unencrypted, so the kernel and initramfs could be tampered with by someone with physical access. Closing that takes your own keys with sbctl and Limine's config enrolment.
-- A real backup. Snapshots share the SSD with the data.
+- A real backup. Snapshots share a drive with the data they cover, and the two drives do not mirror each other.
 - sched-ext schedulers. `scx-scheds` is in the repos for experiments; the stock scheduler is fine on a single-CCD X3D chip.
 - A gaming kernel. The stock `linux` kernel already carries NTSync and sched-ext, so the gain from a tuned kernel is small. To try one, `sudo pacman -S linux-zen linux-zen-headers` is enough: both are in the official repos, the Limine hook adds the boot entry next to the other two, and the headers let DKMS build ryzen_smu for it.
 
