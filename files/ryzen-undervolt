@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Set or show the Curve Optimizer offset of a Ryzen 5000 desktop CPU.
+
+Talks to the CPU's SMU through the ryzen_smu kernel module. The offset is not
+stored anywhere: a reboot clears it, which is why ryzen-undervolt.service
+applies the value from /etc/ryzen-undervolt.conf at every boot.
+
+    ryzen-undervolt show        print the offset of every core
+    ryzen-undervolt set -10     put all cores at -10 until the next reboot
+    ryzen-undervolt reset       put all cores back at 0
+
+Offsets are Curve Optimizer counts from -30 to 0. Run as root.
+"""
+
+import os
+import struct
+import sys
+import time
+
+SYSFS = "/sys/kernel/ryzen_smu_drv"
+CPU_TOPOLOGY = "/sys/devices/system/cpu"
+
+# The command IDs below are the Zen 3 desktop ones (ryzen_smu codename 12,
+# "Vermeer"). Other platforms use other IDs, so everything else is refused.
+CODENAME_VERMEER = 12
+MP1_SET_PSM_MARGIN = 0x35  # arg: [31:28] CCD, [23:20] core in CCD, [15:0] offset
+MP1_GET_PSM_MARGIN = 0x48  # arg: same core bits, answer in the first word
+
+SMU_WAITING = 0
+SMU_OK = 1
+
+MIN_OFFSET = -30
+MAX_OFFSET = 0
+
+
+class Failure(Exception):
+    """An error that ends the run with a message and exit status 1."""
+
+
+def read_bytes(name, size):
+    with open(os.path.join(SYSFS, name), "rb", buffering=0) as handle:
+        return handle.read(size)
+
+
+def write_bytes(name, data):
+    with open(os.path.join(SYSFS, name), "wb", buffering=0) as handle:
+        return handle.write(data)
+
+
+def smu_status():
+    return struct.unpack("<I", read_bytes("mp1_smu_cmd", 4))[0]
+
+
+def wait_while_busy():
+    status = smu_status()
+    for _ in range(50):
+        if status != SMU_WAITING:
+            break
+        time.sleep(0.1)
+        status = smu_status()
+    return status
+
+
+def smu_command(command, argument):
+    """Send one MP1 command and return the first word of the answer."""
+    wait_while_busy()
+    if write_bytes("smu_args", struct.pack("<6I", argument, 0, 0, 0, 0, 0)) != 24:
+        raise Failure("the driver did not accept the command arguments")
+    if write_bytes("mp1_smu_cmd", struct.pack("<I", command)) != 4:
+        raise Failure(f"the driver did not accept command 0x{command:02X}")
+    status = wait_while_busy()
+    if status != SMU_OK:
+        raise Failure(f"SMU command 0x{command:02X} ended with status 0x{status:02X}")
+    return struct.unpack("<6I", read_bytes("smu_args", 24))[0]
+
+
+def core_argument(core):
+    return ((core // 8) << 28) | ((core % 8) << 20)
+
+
+def get_offset(core):
+    value = smu_command(MP1_GET_PSM_MARGIN, core_argument(core))
+    return value - 2**32 if value >= 2**31 else value
+
+
+def set_offset(core, offset):
+    smu_command(MP1_SET_PSM_MARGIN, core_argument(core) | (offset & 0xFFFF))
+
+
+def core_count():
+    """Number of physical cores, counted from the kernel's CPU topology."""
+    cores = set()
+    for entry in os.listdir(CPU_TOPOLOGY):
+        topology = os.path.join(CPU_TOPOLOGY, entry, "topology")
+        if not (entry.startswith("cpu") and entry[3:].isdigit() and os.path.isdir(topology)):
+            continue
+        with open(os.path.join(topology, "physical_package_id")) as package:
+            with open(os.path.join(topology, "core_id")) as core:
+                cores.add((package.read().strip(), core.read().strip()))
+    if not cores:
+        raise Failure("could not count the CPU cores")
+    return len(cores)
+
+
+def check_platform():
+    if os.geteuid() != 0:
+        raise Failure("run this as root")
+    if not os.path.isdir(SYSFS):
+        raise Failure("the ryzen_smu module is not loaded (try: modprobe ryzen_smu)")
+    codename = int(read_bytes("codename", 16).decode().strip())
+    if codename != CODENAME_VERMEER:
+        raise Failure(
+            f"ryzen_smu reports codename {codename}; this tool only knows the "
+            f"commands for codename {CODENAME_VERMEER} (Ryzen 5000 desktop)"
+        )
+
+
+def parse_offset(text):
+    try:
+        offset = int(text)
+    except ValueError:
+        raise Failure(f"'{text}' is not a whole number") from None
+    if not MIN_OFFSET <= offset <= MAX_OFFSET:
+        raise Failure(f"the offset must be between {MIN_OFFSET} and {MAX_OFFSET}, got {offset}")
+    return offset
+
+
+def show(cores):
+    offsets = " ".join(str(get_offset(core)) for core in range(cores))
+    print(f"Curve Optimizer offset, cores 0-{cores - 1}: {offsets}")
+
+
+def apply(cores, offset):
+    for core in range(cores):
+        set_offset(core, offset)
+    wrong = [core for core in range(cores) if get_offset(core) != offset]
+    if wrong:
+        raise Failure(f"cores {wrong} did not take offset {offset}")
+    show(cores)
+
+
+def main(argv):
+    if len(argv) == 2 and argv[1] == "show":
+        check_platform()
+        show(core_count())
+    elif len(argv) == 3 and argv[1] == "set":
+        offset = parse_offset(argv[2])
+        check_platform()
+        apply(core_count(), offset)
+    elif len(argv) == 2 and argv[1] == "reset":
+        check_platform()
+        apply(core_count(), 0)
+    else:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Failure as failure:
+        print(f"ryzen-undervolt: {failure}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as error:
+        print(f"ryzen-undervolt: {error}", file=sys.stderr)
+        sys.exit(1)

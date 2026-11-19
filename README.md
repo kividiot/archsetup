@@ -23,6 +23,7 @@ Vanilla Arch on the whole 2 TB NVMe, encrypted with LUKS2, on btrfs with snapper
 | Shell | zsh with oh-my-zsh and the powerlevel10k prompt | ML4W's own zsh config, with its oh-my-posh prompt swapped for powerlevel10k |
 | Terminal | kitty | ML4W's default terminal. ML4W ships its config and colours it from the wallpaper |
 | Local LLMs | Ollama with the ROCm backend | Runs models on the 9070 XT. Arch's ROCm 10.1 carries kernels for the card |
+| CPU tuning | Curve Optimizer offset of -5 on all cores, through ryzen_smu | A mild undervolt, applied at boot and changed in one config file |
 | Updates | paru for repos and AUR, arch-update for the tray notifier | One command, news shown before upgrading |
 
 The base install is pasted from this runbook, block by block. Everything after first boot is in [`post-install.sh`](post-install.sh), which is safe to run again.
@@ -310,6 +311,7 @@ It asks for your sudo password once. Every stage can be run again, and single st
 | `gaming` | Steam, Lutris, gamescope, MangoHud, gamemode, umu-launcher, Wine, protontricks, ProtonPlus, XIVLauncher-RB |
 | `apps` | Discord, Neovim and its helpers, Helium, Snapmaker Orca, OrcaSlicer |
 | `ollama` | Ollama with the ROCm backend, the ROCm HIP runtime and `rocminfo`, service started. Creates and mounts `@ollama` if Phase 1 did not |
+| `undervolt` | ryzen_smu kernel module through DKMS, the `ryzen-undervolt` tool and a service that applies the Curve Optimizer offset at boot |
 | `maintenance` | Mirror refresh, package cache cleanup, monthly btrfs scrub, fwupd, arch-update |
 | `userconfig` | Hyprland display and gaming snippet, MangoHud config |
 | `shell` | zsh, oh-my-zsh with the plugins ML4W loads, powerlevel10k. The prompt and the login shell follow when it runs again in Phase 5 |
@@ -317,7 +319,7 @@ It asks for your sudo password once. Every stage can be run again, and single st
 
 **What to expect while it runs**
 
-- Ten packages come from the AUR: paru-bin, limine-mkinitcpio-hook, limine-snapper-sync, protonplus, xivlauncher-rb, game-devices-udev, helium-browser-bin, snapmaker-orca-appimage, orca-slicer-bin and arch-update.
+- Eleven packages come from the AUR: paru-bin, limine-mkinitcpio-hook, limine-snapper-sync, protonplus, xivlauncher-rb, game-devices-udev, helium-browser-bin, snapmaker-orca-appimage, orca-slicer-bin, ryzen_smu-dkms-git and arch-update.
 - paru shows each AUR build file for review. Press `q` to leave the pager, then confirm. Set `AUR_NOREVIEW=1` in front of the command to skip all of that.
 - The two Limine packages compile a native binary with GraalVM, and xivlauncher-rb builds with the .NET SDK. Each takes a few minutes.
 - A failed AUR package does not stop the run, except the two Limine ones. The summary lists what to retry.
@@ -504,6 +506,36 @@ The daemon is already running and the kernel parameter that unlocks tuning is se
 2. Optionally lower the power limit or add a small negative voltage offset, then test stability in a demanding game before going further.
 3. Click Apply. The daemon saves the settings and restores them at every boot.
 
+## CPU undervolt
+
+The `undervolt` stage sets a Curve Optimizer offset of -5 on all eight cores. A negative offset makes the CPU ask for less voltage at every frequency, which lowers heat and power. Too large an offset shows up as crashes or sudden reboots, often at idle or light load and not under full load.
+
+**What is installed**
+
+| Piece | Job |
+| --- | --- |
+| `ryzen_smu-dkms-git` (AUR) | Kernel module that gives root access to the CPU's SMU. DKMS rebuilds it for `linux` and `linux-lts` on every kernel update |
+| `/usr/local/bin/ryzen-undervolt` | Small tool from this repository that sets and reads the offset. It refuses any CPU that is not a Ryzen 5000 desktop chip |
+| `/etc/ryzen-undervolt.conf` | The setting: `OFFSET=-5` |
+| `ryzen-undervolt.service` | Applies the setting at boot and again after resume from sleep |
+
+The SMU keeps the offset only until the next reboot. Nothing is written to the firmware, and the BIOS settings stay as they are.
+
+**Change the value**
+
+```bash
+sudo ryzen-undervolt show             # offset of every core
+sudo ryzen-undervolt set -10          # try a value, gone after a reboot
+sudoedit /etc/ryzen-undervolt.conf    # keep it: OFFSET=-10
+sudo systemctl restart ryzen-undervolt.service
+```
+
+The range is -30 to 0, and one count is roughly 3 to 5 mV. Go down in steps of 5 with `set`, live with each step for a while including idle time, and write a value to the config file only once it has proven stable. `OFFSET=0` runs stock voltage.
+
+**If a saved value makes the system unstable**
+
+The service applies the saved value at every boot, so a reboot alone does not help. In the Limine menu press `E` on the Arch Linux entry, append `systemd.mask=ryzen-undervolt.service` to the kernel command line and boot. The system comes up at stock voltage, and you can put a milder value in the config file.
+
 ## Gaming stack
 
 Steam with GE-Proton covers most of the library, Lutris and umu cover everything outside Steam, and XIVLauncher-RB handles FFXIV on its own.
@@ -649,6 +681,7 @@ for repo in ~/.oh-my-zsh/custom/{plugins,themes}/*/.git; do git -C "${repo%/.git
 | Timer | Interval | Job |
 | --- | --- | --- |
 | `arch-update.timer` | At boot, then every 6 hours | Checks for updates, never installs |
+| `ryzen-undervolt.service` | At boot and after resume | Applies the Curve Optimizer offset |
 | snap-pac | Every pacman transaction | Root snapshot before and after |
 | `limine-snapper-sync.service` | On every new snapshot | Makes it bootable |
 | `snapper-timeline.timer` | Hourly | Home snapshot |
@@ -681,6 +714,7 @@ Nothing in this runbook has run on the hardware yet. These are the points to con
 - [ ] `headsetcontrol -b` answers without sudo.
 - [ ] A new kitty window opens zsh with the powerlevel10k prompt and no error lines above it.
 - [ ] `ollama ps` says `100% GPU` while a model is loaded.
+- [ ] `sudo ryzen-undervolt show` prints -5 for all eight cores, also after a reboot.
 - [ ] Both slicers start.
 
 If the snapshot paths are detected wrongly, set `ROOT_SUBVOLUME_PATH` and `ROOT_SNAPSHOTS_PATH` in `/etc/default/limine` and run `sudo limine-update`.
@@ -694,6 +728,7 @@ If the snapshot paths are detected wrongly, set `ROOT_SUBVOLUME_PATH` and `ROOT_
 | Clicking links in kitty does nothing | kitty 0.50.0, the version Arch ships | Add an `open-actions.conf` that hands links to `xdg-open` |
 | The Limine menu is gone after a firmware update | The firmware dropped its boot entry | Nothing. The fallback loader boots, and `sudo limine-install` re-registers the entry |
 | `mkinitcpio -P` asks about Limine | The Limine tooling wraps it | Answer yes, or use `sudo limine-update` |
+| `ryzen-undervolt.service` fails after a kernel update | DKMS could not build ryzen_smu for the new kernel | Check `dkms status`. The system runs at stock voltage until the module builds again, so boot `linux-lts` or wait for the AUR package to catch up |
 | `ollama ps` says CPU and answers are slow | ROCm did not accept the GPU | Follow "ROCm is not utilizing my AMD GPU" on the [Arch wiki](https://wiki.archlinux.org/title/Ollama#ROCm_is_not_utilizing_my_AMD_GPU), or switch to `ollama-vulkan` |
 
 **Deliberately left out**
@@ -701,7 +736,7 @@ If the snapshot paths are detected wrongly, set `ROOT_SUBVOLUME_PATH` and `ROOT_
 - Secure Boot. The EFI partition is unencrypted, so the kernel and initramfs could be tampered with by someone with physical access. Closing that takes your own keys with sbctl and Limine's config enrolment.
 - A real backup. Snapshots share the SSD with the data.
 - sched-ext schedulers. `scx-scheds` is in the repos for experiments; the stock scheduler is fine on a single-CCD X3D chip.
-- A gaming kernel. The stock `linux` kernel already carries NTSync and sched-ext, so the gain from a tuned kernel is small. To try one, `sudo pacman -S linux-zen` is enough: it is in the official repos, and the Limine hook adds its boot entry next to the other two.
+- A gaming kernel. The stock `linux` kernel already carries NTSync and sched-ext, so the gain from a tuned kernel is small. To try one, `sudo pacman -S linux-zen linux-zen-headers` is enough: both are in the official repos, the Limine hook adds the boot entry next to the other two, and the headers let DKMS build ryzen_smu for it.
 
 sshd stays enabled from the install. Run `sudo systemctl disable --now sshd` if you do not want it.
 
@@ -709,6 +744,7 @@ sshd stays enabled from the install. Run `sudo systemctl disable --now sshd` if 
 
 - Arch wiki: [Limine](https://wiki.archlinux.org/title/Limine), [Snapper](https://wiki.archlinux.org/title/Snapper), [Ollama](https://wiki.archlinux.org/title/Ollama)
 - [XIVLauncher-RB source](https://github.com/rankynbass/XIVLauncher.Core/tree/RB-patched), for the storage path
+- [ryzen_smu README](https://github.com/amkillam/ryzen_smu) for the driver interface. The Curve Optimizer command IDs match [ZenStates-Core](https://github.com/irusanov/ZenStates-Core) and [Ryzen-5800x3d-linux-undervolting](https://github.com/svenlange2/Ryzen-5800x3d-linux-undervolting)
 - [limine-snapper-sync README](https://gitlab.com/Zesko/limine-snapper-sync/-/blob/master/README.md) and [limine-entry-tool README](https://gitlab.com/Zesko/limine-entry-tool/-/blob/master/README.md)
 - Hyprland 0.57 wiki: [monitor colors and HDR](https://wiki.hypr.land/0.57.0/configuring/core/monitors/colors/), [tearing](https://wiki.hypr.land/0.57.0/configuring/extra/tearing/), [config options](https://wiki.hypr.land/0.57.0/configuring/core/config-options/)
 - [GE-Proton README](https://github.com/GloriousEggroll/proton-ge-custom): HDR, NTSync and FSR 4 options

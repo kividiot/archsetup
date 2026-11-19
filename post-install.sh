@@ -17,7 +17,10 @@
 
 set -euo pipefail
 
-STAGES=(system snapper paru limine graphics desktop audio gaming apps ollama maintenance userconfig shell summary)
+STAGES=(system snapper paru limine graphics desktop audio gaming apps ollama undervolt maintenance userconfig shell summary)
+
+# Where this script and its files/ folder live.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 MIRROR_COUNTRIES="Sweden,Germany"
 FAILED=()
@@ -329,6 +332,56 @@ stage_ollama() {
     sudo systemctl enable --now ollama.service
 }
 
+stage_undervolt() {
+    command -v paru >/dev/null || die "paru is missing. Run the paru stage first."
+    local tool=$SCRIPT_DIR/files/ryzen-undervolt
+    [[ -f $tool ]] || die "$tool is missing. Run post-install.sh from a full clone of the repository."
+
+    # ryzen_smu gives root access to the CPU's SMU. DKMS rebuilds it for every
+    # installed kernel and needs the matching headers to do so.
+    pac dkms linux-headers linux-lts-headers python
+    aur ryzen_smu-dkms-git
+    if ! pacman -Qq ryzen_smu-dkms-git &>/dev/null; then
+        warn "ryzen_smu-dkms-git did not install; the undervolt service was not set up."
+        return 0
+    fi
+    echo ryzen_smu | sudo tee /etc/modules-load.d/ryzen_smu.conf >/dev/null
+
+    # The one setting. Kept on a re-run so a tuned value is not reset.
+    if [[ ! -f /etc/ryzen-undervolt.conf ]]; then
+        sudo tee /etc/ryzen-undervolt.conf >/dev/null <<'EOF'
+# Curve Optimizer offset for all cores, in counts from -30 to 0.
+# One count is roughly 3 to 5 mV less. 0 turns the undervolt off.
+# Apply a change with: sudo systemctl restart ryzen-undervolt.service
+OFFSET=-5
+EOF
+    fi
+
+    sudo install -Dm755 "$tool" /usr/local/bin/ryzen-undervolt
+
+    # The SMU forgets the offset on a reboot, so it is applied at every boot,
+    # and again after resume in case sleep cleared it. No RemainAfterExit: the
+    # unit has to be startable again on the next resume.
+    sudo tee /etc/systemd/system/ryzen-undervolt.service >/dev/null <<'EOF'
+[Unit]
+Description=Ryzen Curve Optimizer offset (undervolt)
+After=systemd-modules-load.service suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/ryzen-undervolt.conf
+ExecStartPre=/usr/bin/modprobe ryzen_smu
+ExecStart=/usr/local/bin/ryzen-undervolt set ${OFFSET}
+
+[Install]
+WantedBy=multi-user.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+EOF
+    sudo systemctl daemon-reload
+    sudo systemctl enable ryzen-undervolt.service
+    sudo systemctl restart ryzen-undervolt.service \
+        || warn "ryzen-undervolt.service failed. Read 'journalctl -b -u ryzen-undervolt.service'; the system runs at stock voltage until it works."
+}
+
 stage_maintenance() {
     command -v paru >/dev/null || die "paru is missing. Run the paru stage first."
     pac pacman-contrib reflector fwupd
@@ -499,6 +552,9 @@ stage_summary() {
     info "lactd:       $(systemctl is-active lactd.service 2>/dev/null || true)"
     info "sddm:        $(systemctl is-enabled sddm.service 2>/dev/null || true)"
     info "ollama:      $(systemctl is-active ollama.service 2>/dev/null || true), models on $(findmnt -no SOURCE /var/lib/ollama 2>/dev/null || echo 'the root subvolume')"
+    if [[ -x /usr/local/bin/ryzen-undervolt ]]; then
+        info "undervolt:   $(sudo /usr/local/bin/ryzen-undervolt show 2>&1 || true)"
+    fi
     info "login shell: $(getent passwd "$USER" | cut -d: -f7)"
     if command -v limine-snapper-info >/dev/null; then
         sudo limine-snapper-info || true
