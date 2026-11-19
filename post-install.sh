@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-STAGES=(system snapper paru limine graphics desktop audio gaming apps maintenance userconfig shell summary)
+STAGES=(system snapper paru limine graphics desktop audio gaming apps ollama maintenance userconfig shell summary)
 
 MIRROR_COUNTRIES="Sweden,Germany"
 FAILED=()
@@ -161,7 +161,7 @@ stage_snapper() {
     # Keep big, replaceable data out of the home snapshots. This must happen
     # before Steam and friends create these directories.
     local dir
-    for dir in .cache .local/share/Steam .xlcore Games; do
+    for dir in .cache .local/share/Steam .local/share/dev.goats.xivlauncher Games; do
         mksubvol "$HOME/$dir"
     done
 
@@ -282,6 +282,51 @@ stage_apps() {
     pac discord neovim ripgrep fd nodejs npm unzip tree-sitter-cli lazygit \
         fastfetch btop wget jq rsync fuse2
     aur helium-browser-bin snapmaker-orca-appimage orca-slicer-bin
+}
+
+stage_ollama() {
+    # Models run to tens of GB. They belong in a top-level subvolume of their
+    # own, so root snapshots do not pin them and a rollback of @ leaves them
+    # in place. The runbook creates @ollama in Phase 1; this part covers an
+    # install that was partitioned before that step existed.
+    local models=/var/lib/ollama
+    if ! findmnt -n "$models" >/dev/null; then
+        if [[ -d $models && -n $(ls -A "$models" 2>/dev/null) ]]; then
+            warn "$models already has content and is not its own subvolume: the models stay in the root snapshots."
+        else
+            local dev top line
+            dev=$(findmnt -no SOURCE / | sed 's/\[.*//')
+            top=$(mktemp -d)
+            sudo mount -o subvolid=5 "$dev" "$top"
+            if [[ ! -d $top/@ollama ]]; then
+                sudo btrfs subvolume create "$top/@ollama" >/dev/null
+            fi
+            sudo umount "$top"
+            rmdir "$top"
+
+            # Same device and mount options as the package cache, other subvolume.
+            if ! awk -v m="$models" '$2 == m { found = 1 } END { exit !found }' /etc/fstab; then
+                line=$(awk '$2 == "/var/cache/pacman/pkg"' /etc/fstab \
+                    | sed -E -e "s|/var/cache/pacman/pkg|$models|" -e 's|subvol=/?@pkg|subvol=/@ollama|')
+                [[ $line == *"subvol=/@ollama"* ]] || die "Could not derive an fstab line for $models from the @pkg line."
+                echo "$line" | sudo tee -a /etc/fstab >/dev/null
+            fi
+            sudo mkdir -p "$models"
+            sudo systemctl daemon-reload
+            sudo mount "$models"
+            info "subvolume @ollama mounted at $models"
+        fi
+    fi
+
+    # ollama-rocm pulls in the ROCm libraries it links against. The HIP runtime
+    # group and rocminfo are named so they count as installed on purpose.
+    pac ollama-rocm rocm-hip-runtime rocminfo
+
+    # A fresh subvolume belongs to root; the service runs as the ollama user.
+    if [[ $(stat -c %U "$models") != ollama ]]; then
+        sudo chown ollama:ollama "$models"
+    fi
+    sudo systemctl enable --now ollama.service
 }
 
 stage_maintenance() {
@@ -453,6 +498,7 @@ stage_summary() {
     info "snapper:     $(sudo snapper list-configs --columns config 2>/dev/null | tail -n +3 | tr '\n' ' ')"
     info "lactd:       $(systemctl is-active lactd.service 2>/dev/null || true)"
     info "sddm:        $(systemctl is-enabled sddm.service 2>/dev/null || true)"
+    info "ollama:      $(systemctl is-active ollama.service 2>/dev/null || true), models on $(findmnt -no SOURCE /var/lib/ollama 2>/dev/null || echo 'the root subvolume')"
     info "login shell: $(getent passwd "$USER" | cut -d: -f7)"
     if command -v limine-snapper-info >/dev/null; then
         sudo limine-snapper-info || true

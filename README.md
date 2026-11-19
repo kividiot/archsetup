@@ -15,12 +15,14 @@ Vanilla Arch on the whole 2 TB NVMe, encrypted with LUKS2, on btrfs with snapper
 | Install method | Manual commands, pasted over SSH into the live ISO | Every step is visible and repeatable |
 | Partitions | 4 GiB EFI partition at `/boot`, rest is one LUKS2 container | Kernels sit on the EFI partition, so each snapshot keeps its own bootable kernel copy |
 | Unlock | Passphrase at boot | Nothing depends on TPM or Secure Boot state |
-| Filesystem | btrfs with zstd compression and separate subvolumes for root, home, snapshots, logs and package cache | Root snapshots stay small and never roll back your home or game libraries |
+| Filesystem | btrfs with zstd compression and separate subvolumes for root, home, snapshots, logs, package cache and Ollama models | Root snapshots stay small and never roll back your home or game libraries |
 | Snapshots | snapper + snap-pac + limine-snapper-sync | A snapshot before and after every pacman transaction, each one bootable |
 | Bootloader | Limine | The only bootloader with maintained snapper boot-entry sync for an unencrypted `/boot` |
 | Kernel | `linux`, with `linux-lts` installed as fallback | Newest amdgpu code for the 9070 XT, plus a second kernel when an update misbehaves |
 | Desktop | Hyprland with a stock install of the ML4W dotfiles | A complete, maintained rice with its own installer and updater |
 | Shell | zsh with oh-my-zsh and the powerlevel10k prompt | ML4W's own zsh config, with its oh-my-posh prompt swapped for powerlevel10k |
+| Terminal | kitty | ML4W's default terminal. ML4W ships its config and colours it from the wallpaper |
+| Local LLMs | Ollama with the ROCm backend | Runs models on the 9070 XT. Arch's ROCm 10.1 carries kernels for the card |
 | Updates | paru for repos and AUR, arch-update for the tray notifier | One command, news shown before upgrading |
 
 The base install is pasted from this runbook, block by block. Everything after first boot is in [`post-install.sh`](post-install.sh), which is safe to run again.
@@ -115,7 +117,7 @@ mkfs.fat -F32 -n EFI "$ESP"
 mkfs.btrfs -L arch /dev/mapper/cryptroot
 
 mount /dev/mapper/cryptroot /mnt
-for sv in @ @home @snapshots @log @pkg; do btrfs subvolume create /mnt/$sv; done
+for sv in @ @home @snapshots @log @pkg @ollama; do btrfs subvolume create /mnt/$sv; done
 umount /mnt
 ```
 
@@ -126,6 +128,7 @@ umount /mnt
 | `@snapshots` | `/.snapshots` | No, it holds the root snapshots |
 | `@log` | `/var/log` | No, so logs from a broken boot survive the rollback |
 | `@pkg` | `/var/cache/pacman/pkg` | No, the package cache is disposable |
+| `@ollama` | `/var/lib/ollama` | No, downloaded models are large and can be pulled again |
 
 **Mount**
 
@@ -136,11 +139,12 @@ mount --mkdir -o $OPTS,subvol=@home      /dev/mapper/cryptroot /mnt/home
 mount --mkdir -o $OPTS,subvol=@snapshots /dev/mapper/cryptroot /mnt/.snapshots
 mount --mkdir -o $OPTS,subvol=@log       /dev/mapper/cryptroot /mnt/var/log
 mount --mkdir -o $OPTS,subvol=@pkg       /dev/mapper/cryptroot /mnt/var/cache/pacman/pkg
+mount --mkdir -o $OPTS,subvol=@ollama    /dev/mapper/cryptroot /mnt/var/lib/ollama
 mount --mkdir -o umask=0077 "$ESP" /mnt/boot
 findmnt -R /mnt
 ```
 
-`findmnt` must list six mounts: root, home, snapshots, log, pkg and boot.
+`findmnt` must list seven mounts: root, home, snapshots, log, pkg, ollama and boot.
 
 ## Phase 2: Base system
 
@@ -297,7 +301,7 @@ It asks for your sudo password once. Every stage can be run again, and single st
 | Stage | What it does |
 | --- | --- |
 | `system` | Full upgrade, zram swap, NTSync kernel module, Bluetooth |
-| `snapper` | Root config with a snapshot pair around every pacman transaction, home config with an hourly timeline, and excluded subvolumes for `~/.cache`, Steam, `~/.xlcore` and `~/Games` |
+| `snapper` | Root config with a snapshot pair around every pacman transaction, home config with an hourly timeline, and excluded subvolumes for `~/.cache`, Steam, `~/.local/share/dev.goats.xivlauncher` and `~/Games` |
 | `paru` | Builds the AUR helper |
 | `limine` | Installs limine-mkinitcpio-hook and limine-snapper-sync, adds the overlay hook, registers the UEFI entry, generates the permanent "Arch Linux" boot entries |
 | `graphics` | Mesa and RADV in 64 and 32 bit, LACT |
@@ -305,6 +309,7 @@ It asks for your sudo password once. Every stage can be run again, and single st
 | `audio` | PipeWire stack, LDAC, HeadsetControl |
 | `gaming` | Steam, Lutris, gamescope, MangoHud, gamemode, umu-launcher, Wine, protontricks, ProtonPlus, XIVLauncher-RB |
 | `apps` | Discord, Neovim and its helpers, Helium, Snapmaker Orca, OrcaSlicer |
+| `ollama` | Ollama with the ROCm backend, the ROCm HIP runtime and `rocminfo`, service started. Creates and mounts `@ollama` if Phase 1 did not |
 | `maintenance` | Mirror refresh, package cache cleanup, monthly btrfs scrub, fwupd, arch-update |
 | `userconfig` | Hyprland display and gaming snippet, MangoHud config |
 | `shell` | zsh, oh-my-zsh with the plugins ML4W loads, powerlevel10k. The prompt and the login shell follow when it runs again in Phase 5 |
@@ -351,8 +356,8 @@ Snapshots taken before the Limine tooling was installed never become boot entrie
 
 | Config | Covers | Created | Kept |
 | --- | --- | --- | --- |
-| `root` | `/` without home, logs and package cache | Before and after every pacman or paru transaction | 20, plus up to 6 marked important |
-| `home` | `/home` without `~/.cache`, Steam, `~/.xlcore`, `~/Games` | Hourly | 6 hourly, 7 daily, 2 weekly |
+| `root` | `/` without home, logs, package cache and Ollama models | Before and after every pacman or paru transaction | 20, plus up to 6 marked important |
+| `home` | `/home` without `~/.cache`, Steam, `~/.local/share/dev.goats.xivlauncher`, `~/Games` | Hourly | 6 hourly, 7 daily, 2 weekly |
 
 The newest 12 root snapshots are bootable from the Limine menu. Snapshots sit on the same SSD as the data. They undo bad updates and deleted files, and they do not survive a dead drive, so anything irreplaceable still needs a copy elsewhere.
 
@@ -513,7 +518,7 @@ Steam with GE-Proton covers most of the library, Lutris and umu cover everything
 | gamescope | `gamescope` | A per-game micro-compositor for stubborn HDR, scaling or focus problems |
 | MangoHud, GOverlay | `mangohud`, `goverlay` | The overlay and a GUI to edit it. Toggle with Right Shift + F12 |
 | gamemode | `gamemode` | Performance governor and process priority while a game runs |
-| XIVLauncher-RB | `xivlauncher-rb` (AUR) | FFXIV with Dalamud. Game data lands in `~/.xlcore` |
+| XIVLauncher-RB | `xivlauncher-rb` (AUR) | FFXIV with Dalamud. Game data lands in `~/.local/share/dev.goats.xivlauncher`, and the launcher adds a `~/.xlcore` symlink to it |
 | LACT | `lact` | GPU fan curve, power limit, voltage offset |
 
 **First run**
@@ -561,8 +566,25 @@ Every app on the list has a package, and the post-install script installs all of
 | XIVLauncher-RB | `xivlauncher-rb` | AUR | 1.4.0.12 | Built from source |
 | LACT | `lact` | extra | 0.10.1 | |
 | Wine | `wine-staging` | extra | 11.22 | |
+| kitty | `kitty` | extra | 0.50.0 | The terminal. Installed by the `desktop` stage and set as ML4W's default |
+| Ollama | `ollama-rocm` | extra | 0.40.16 | Installed with `rocm-hip-runtime` and `rocminfo`, ROCm 10.1 |
 
 The two slicers are separate packages from different upstreams and should install side by side. If pacman reports a file conflict between them, keep Snapmaker Orca from the AUR and take OrcaSlicer from Flathub instead.
+
+**Local models with Ollama**
+
+`ollama-rocm` runs models on the 9070 XT through ROCm. Arch's ROCm 10.1 ships kernels for the card's `gfx1201` target, so the `HSA_OVERRIDE_GFX_VERSION` workaround for unsupported cards should not be needed. The `ollama` stage starts `ollama.service`; check the GPU path once:
+
+```bash
+/opt/rocm/bin/rocminfo | grep amdhsa     # must name gfx1201
+ollama run gemma3:270m                   # small test model, /bye to leave
+ollama ps                                # PROCESSOR must say 100% GPU
+```
+
+- Models are stored in `/var/lib/ollama` on the `@ollama` subvolume, outside the root snapshots.
+- A model stays in VRAM for five minutes after its last request. Run `ollama stop <model>` before starting a game that wants all 16 GB.
+- The [Arch wiki](https://wiki.archlinux.org/title/Ollama) says `ollama-vulkan` is usually faster than `ollama-rocm` on RDNA 3 and newer cards and uses less power. To compare, install `ollama-vulkan`, remove `ollama-rocm` and restart the service.
+- ROCm's OpenCL for other compute apps is a separate package, `rocm-opencl-runtime`. It is not installed.
 
 ## Audio: Audeze Maxwell
 
@@ -658,6 +680,7 @@ Nothing in this runbook has run on the hardware yet. These are the points to con
 - [ ] The output name and scale in `~/.config/gaming/hyprland.lua` match the monitor.
 - [ ] `headsetcontrol -b` answers without sudo.
 - [ ] A new kitty window opens zsh with the powerlevel10k prompt and no error lines above it.
+- [ ] `ollama ps` says `100% GPU` while a model is loaded.
 - [ ] Both slicers start.
 
 If the snapshot paths are detected wrongly, set `ROOT_SUBVOLUME_PATH` and `ROOT_SNAPSHOTS_PATH` in `/etc/default/limine` and run `sudo limine-update`.
@@ -671,6 +694,7 @@ If the snapshot paths are detected wrongly, set `ROOT_SUBVOLUME_PATH` and `ROOT_
 | Clicking links in kitty does nothing | kitty 0.50.0, the version Arch ships | Add an `open-actions.conf` that hands links to `xdg-open` |
 | The Limine menu is gone after a firmware update | The firmware dropped its boot entry | Nothing. The fallback loader boots, and `sudo limine-install` re-registers the entry |
 | `mkinitcpio -P` asks about Limine | The Limine tooling wraps it | Answer yes, or use `sudo limine-update` |
+| `ollama ps` says CPU and answers are slow | ROCm did not accept the GPU | Follow "ROCm is not utilizing my AMD GPU" on the [Arch wiki](https://wiki.archlinux.org/title/Ollama#ROCm_is_not_utilizing_my_AMD_GPU), or switch to `ollama-vulkan` |
 
 **Deliberately left out**
 
@@ -683,7 +707,8 @@ sshd stays enabled from the install. Run `sudo systemctl disable --now sshd` if 
 
 ## Sources
 
-- Arch wiki: [Limine](https://wiki.archlinux.org/title/Limine), [Snapper](https://wiki.archlinux.org/title/Snapper)
+- Arch wiki: [Limine](https://wiki.archlinux.org/title/Limine), [Snapper](https://wiki.archlinux.org/title/Snapper), [Ollama](https://wiki.archlinux.org/title/Ollama)
+- [XIVLauncher-RB source](https://github.com/rankynbass/XIVLauncher.Core/tree/RB-patched), for the storage path
 - [limine-snapper-sync README](https://gitlab.com/Zesko/limine-snapper-sync/-/blob/master/README.md) and [limine-entry-tool README](https://gitlab.com/Zesko/limine-entry-tool/-/blob/master/README.md)
 - Hyprland 0.57 wiki: [monitor colors and HDR](https://wiki.hypr.land/0.57.0/configuring/core/monitors/colors/), [tearing](https://wiki.hypr.land/0.57.0/configuring/extra/tearing/), [config options](https://wiki.hypr.land/0.57.0/configuring/core/config-options/)
 - [GE-Proton README](https://github.com/GloriousEggroll/proton-ge-custom): HDR, NTSync and FSR 4 options
