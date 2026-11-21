@@ -777,6 +777,28 @@ If the snapshot paths are detected wrongly, set `ROOT_SUBVOLUME_PATH` and `ROOT_
 | Boot stops in emergency mode after the passphrase | The data drive did not open or mount | Log in as root and read `systemctl status systemd-cryptsetup@cryptdata.service`. `cryptsetup open /dev/disk/by-partlabel/cryptdata cryptdata` opens it with the passphrase, then `mount -a` and `systemctl default` continue the boot |
 | `ryzen-undervolt.service` fails after a kernel update | DKMS could not build ryzen_smu for the new kernel | Check `dkms status`. The system runs at stock voltage until the module builds again, so boot `linux-lts` or wait for the AUR package to catch up |
 | `ollama ps` says CPU and answers are slow | ROCm did not accept the GPU | Follow "ROCm is not utilizing my AMD GPU" on the [Arch wiki](https://wiki.archlinux.org/title/Ollama#ROCm_is_not_utilizing_my_AMD_GPU), or switch to `ollama-vulkan` |
+| A game assumes a controller although none is connected | A keyboard with analog switches announces a gamepad interface. Seen with the Glorious GMMK 3 HE in Path of Exile 2 | Hide that interface with the udev rule below |
+
+**Keyboard detected as a controller**
+
+`ls -l /dev/input/js*` lists a joystick although no controller is plugged in. Find the device and its USB ID:
+
+```bash
+grep -B8 'js[0-9]' /proc/bus/input/devices | grep -E 'Name|Vendor|Handlers'
+lsusb
+```
+
+The rule below is for the GMMK 3 HE (75%), USB ID `342d:e3f3`. For another device, change the two IDs. It takes the gamepad interface away from user programs and leaves the keys alone.
+
+```bash
+sudo tee /etc/udev/rules.d/65-gmmk-no-joystick.rules >/dev/null <<'EOF'
+# Glorious GMMK 3 HE: hide the gamepad interface, keep the keyboard.
+SUBSYSTEM=="input", ATTRS{idVendor}=="342d", ATTRS{idProduct}=="e3f3", ENV{ID_INPUT_JOYSTICK}=="1", ENV{ID_INPUT_JOYSTICK}="", MODE="0000"
+EOF
+sudo udevadm control --reload
+```
+
+Unplug the keyboard and plug it back in. `ls -l /dev/input/js*` must now show `c---------`. Quit Steam completely and start it again before trying the game.
 
 **Deliberately left out**
 
